@@ -1,0 +1,142 @@
+---
+title: "DATA608 - Final"
+author: "Rob Welk"
+date: "May 17, 2020"
+output: 
+  html_document:
+    highlight: tango
+    number_sections: yes
+    toc: yes
+    
+  
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Shiny app
+For my final project, I made a Shiny app that displays visualizations of real-time water quality data from the U.s. Geological Survey (USGS) for the geographic region of Long Island, New York.
+App Available :https://robertwelk.shinyapps.io/DATA608_final/?_ga=2.150054134.1761314644.1589728435-1274356216.1588363575
+
+# GitHub
+All files included app source code (app.R), project write-up (DATA608_final_writeup.Rmd), and tables (yearly_means.csv, endpoint_rates.csv, and site_means.csv) are posted in a GitHub repository.
+https://github.com/robertwelk/DATA608_final_project
+
+
+# Data Source
+The data for this project comes from the USGS tide monitoring network, which consists of 18 water quality monitoring stations in the coastal estuaries of Long Island. Each station collects real-time, continuous data of one of more parameters at 6-minute intervals. The data is then logged by an on-site Data Collection Platform, and transmitted to an online database (National Water Information System, NWIS https://waterdata.usgs.gov/nwis) via satellite telemetry.  Water-level elevation measurements serve as an early warning signal to local officials by triggering a response when levels surpass flood-elevation thresholds.  Other collected parameters, such as dissolved oxygen, temperature, pH, salinity, turbidity, and chlorophyll, are important indicators of ecological health of coastal environemnts. Continuous measurements allow for insight into day/night, seasonal, tidal, and weather related patterns that would not be possible with discrete measurements. All NWIS data used for this app was loaded into R using the USGS dataRetrieval package https://cran.r-project.org/web/packages/dataRetrieval/dataRetrieval.pdf.   
+
+# Description of the app
+
+## Current conditions
+The Shiny app was designed to provide an overview of the monitoring network in several ways.  First it provides a live status of each station for a selected parameter.  This information is displayed on an interactive Leaflet map where the station status is provided - the station can be set up to collect the parameter, but not be in working conidion, or it could be reporting as expected, or it may not collect the parameter at all. This information can be seen from the map, and it provides a live update each time the app is loaded.  The accompanying time-series graph shows the previous 5 days of data, and includes the global mean for the parameter at the site.  This can serve as a diagnostic for anamolous values that are being collected at the station due to either sensor fouling or drift. 
+
+## Long-term trends
+In addition to viewing the current cuurent conditions of the network, the long-term trends can also be visualized.  This was done by calculating mean yearly values for each parameter (except pH) at each site it is collected. The yearly means are plotted as a time-series with a line of best fit that shows the overall trend at that station over time. Additional stations can be selected and appear as small multiples on the plot, allowing clear and concise comparisons across stationss to be made.  The data are summarized further by using end-point rates of change - that is, the most recent yearly mean minus the earliest yearly mean divided by the total years (yearly means are only calcualted from a complete year of data collection).  End-point rates are displayed on a map so that the spatial distribution of change over time of a parameter can be visualized. For example, we see that water level elevation is generally increasing across the geographich region, which presents challenges for low-lying coastal communities. This change, however, does not appear to be spatially uniform, as higher rates of change are generally seen along the south shore than in the north shore.  
+
+# Additional code
+This code was used to generate 3 tables used in the app.
+
+## Packages 
+```{r}
+require(dataRetrieval)
+require(dplyr)
+require(tidyr)
+```
+
+## yearly_means.csv 
+```{r} 
+# Dataframe for stations - ID numbers and station names
+station_df <- tibble('site_no'=c('01311143','01302600','01302845','01304057','01304200','01304562',
+                                 '01304746','01304920','01305575','01306402','01309225','01310521',
+                                 '01310740','01311145','01311850','01311875','01376562','01302250'),
+                
+                'site_nm'=c('Hog Island Channel','West Pond','Frost Creek','Flax Pond','Orient Harbor','Peconic River',
+                            'Shinnecock Bay','Moriches Bay','Watch Hill', 'Sayville','Lindenhurst','Freeport',
+                            'Reynolds Channel', 'East Rockaway','Jamaica Bay','Rockaway Inlet','Great Kills Harbor','East Creek'
+                ))
+
+# Dataframe of collected parameters - name, USGS parameter code, and units of measurement
+parameters <- tibble('parm_nm'= c("Elevation [ft]", "Salinity [ppt]", "Dissolved Oxygen [mg/L]", "pH", "Temperature [C]", "Chlorophyll [ug/L]", "Turbidity [FNU]"),
+                     'parm_cd'= c('62619', '90860',"00300","00400","00010","62361","63680"),
+                     'units'=c('feet', 'parts per thousand', 'milligrams per Liter', 'pH', 'degrees Celcius', 'microgram/Liter', 'FNU'))
+
+# Retrieve daily values data from NWIS - there are no daily values for pH, Turbidity has 3 output columns (different collection codes)
+rawDailyData <- readNWISdv(station_df$site_no, parameters$parm_cd) %>% 
+  as_tibble() 
+
+# consolidate turbidity  
+turb <- rawDailyData %>% 
+  select(site_no, Date,contains('63680')) %>% 
+  gather("type", "63680", c(3,5,7)) %>% 
+  select(site_no, Date, '63680')
+  
+# join tables and select columns of interest
+rawDailyData <- rawDailyData %>% select(site_no, 
+         Date, 
+         '00010'= X_00010_00003,
+         '62619'= X_62619_00003,
+         '00300'= X_00300_00003,
+         '90860'= X_90860_00003,
+         '62361'= X_62361_00003) %>% 
+          left_join(turb, by = c("site_no" = "site_no", "Date"="Date"))
+
+# extract year from the Date column
+rawDailyData$year <- substring(rawDailyData$Date, 1,4)
+
+# get into long format and calclate yearly mean
+yearly_means <- 
+  rawDailyData %>%
+  gather("parameter", "value", 3:8) %>%   
+  group_by(year,parameter, site_no) %>% 
+  summarize('val'=mean(value, na.rm=T)) %>% 
+  drop_na() %>%   
+  group_by(parameter, site_no) %>%
+  arrange(year) %>% 
+  filter(row_number()!=1 & row_number()!=n()) %>% # remove first and last year of data collection(incomplete years)
+  filter(!(site_no=='01304057' & year==2018)) #bad data for one of the sites  
+  
+yearly_means %>% write.csv('yearly_means.csv', row.names = FALSE)
+```
+
+## site_means.csv
+```{r}
+rawDailyData %>%
+  gather("parameter", "value", 3:8) %>% 
+  filter(year != '2020') %>% 
+  group_by(site_no, parameter) %>% 
+  summarize('mean'=mean(value, na.rm=T)) %>% 
+  filter(!is.na(mean)) %>%
+  write.csv('site_means.csv', row.names = FALSE)
+```
+
+## endpoint_rates.csv
+```{r}
+x <- yearly_means %>% 
+  
+  group_by(parameter, site_no) %>%
+  arrange(year) %>% 
+  summarize('minyear'=min(year), 
+            'maxyear'=max(year),
+            'difference'=last(val)-first(val)) 
+
+endpoint_rates <- x %>% 
+  mutate('num_years'=as.numeric(maxyear)-as.numeric(minyear), 'rate'=difference/num_years) %>% 
+  filter(num_years > 2) 
+
+# Retrieves site information from NWIS database including lat/long coordinates 
+site.info <-readNWISsite(station_df$site_no) %>%
+                as_tibble() %>%
+                select(site_no,
+                       'station_name'=station_nm,
+                       'latitude'=dec_lat_va,
+                       'longitude'=dec_long_va)
+
+#join site info with end_point rates
+site.info %>% 
+  left_join(endpoint_rates, by="site_no") %>% 
+  write.csv('endpoint_rates.csv', row.names = FALSE)
+```
+
